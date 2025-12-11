@@ -15,7 +15,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   // Production (Vercel)
   serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 } else {
-  // Development (Local) - This path is correct based on your screenshot
+  // Development (Local)
   serviceAccount = require("./firebase-admin-service-key.json");
 }
 
@@ -23,15 +23,27 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 
-// --- ADDED THIS LINE TO TEST ---
+// --- TEST LOG ---
 console.log("Firebase Admin Initialized for project:", serviceAccount.project_id);
 // ----------------------------------------------
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// --- FIXED CORS MIDDLEWARE ---
+const corsOptions = {
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    // ADD YOUR DEPLOYED CLIENT LINKS HERE:
+    'https://foodmate-acaf3.web.app',
+    'https://foodmate-acaf3.firebaseapp.com',
+    'https://food-chef-server-three.vercel.app'
+  ],
+  credentials: true,
+  optionSuccessStatus: 200,
+}
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // MongoDB Connection String
