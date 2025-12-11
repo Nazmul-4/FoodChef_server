@@ -4,6 +4,18 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// --- 1. FIREBASE ADMIN SETUP (SECURITY) ---
+const admin = require("firebase-admin");
+
+// This imports the key file you downloaded. 
+// Ensure "firebase-admin-service-key.json" is in the SAME folder as this file.
+const serviceAccount = require("./firebase-admin-service-key.json"); 
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+// ------------------------------------------
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -23,6 +35,27 @@ const client = new MongoClient(uri, {
     }
 });
 
+// --- 2. VERIFY TOKEN MIDDLEWARE (SECURITY GUARD) ---
+const verifyToken = async (req, res, next) => {
+  // 1. Check if authorization header exists
+  if (!req.headers.authorization) {
+    return res.status(401).send({ message: 'unauthorized access' });
+  }
+
+  // 2. Get the token (remove "Bearer " part)
+  const token = req.headers.authorization.split(' ')[1];
+
+  // 3. Verify with Firebase
+  try {
+    const decodedUser = await admin.auth().verifyIdToken(token);
+    req.decodedUser = decodedUser; // Add user info to request
+    next(); // Let them pass
+  } catch (error) {
+    return res.status(401).send({ message: 'unauthorized access' });
+  }
+};
+// ---------------------------------------------------
+
 async function run() {
     try {
         // Connect to the database and collections
@@ -34,12 +67,7 @@ async function run() {
         const ordersCollection = database.collection("orders");
         const paymentCollection = database.collection("payments");
 
-        // --- TEMPORARY: DATA SEEDING ROUTE ---
-        app.get('/add-sample-food', async (req, res) => {
-            res.send({ message: "Seeding route exists" });
-        });
-
-        // --- PUBLIC ROUTES ---
+        // --- PUBLIC ROUTES (Anyone can see these) ---
 
         // 1. Get All Meals
         app.get('/meals', async (req, res) => {
@@ -55,9 +83,13 @@ async function run() {
             res.send(result);
         })
 
-        // --- USERS ROUTES ---
+        // 3. Get Top Meals (Sorted by Orders) - NEW ROUTE
+        app.get('/meals/top', async (req, res) => {
+            const result = await mealsCollection.find().sort({ orders: -1 }).limit(6).toArray();
+            res.send(result);
+        });
 
-        // 3. Save User on Registration
+        // 4. Save User on Registration (Must be Public)
         app.post('/users', async (req, res) => {
             const user = req.body;
             const query = { email: user.email };
@@ -69,14 +101,17 @@ async function run() {
             res.send(result);
         })
 
-        // 4. Get All Users (Admin only)
-        app.get('/users', async (req, res) => {
+
+        // --- SECURE ROUTES (Login Required via verifyToken) ---
+
+        // 5. Get All Users (Admin only usually)
+        app.get('/users', verifyToken, async (req, res) => {
             const result = await usersCollection.find().toArray();
             res.send(result);
         });
 
-        // 5. Update User Role
-        app.patch('/users/admin/:id', async (req, res) => {
+        // 6. Update User Role
+        app.patch('/users/admin/:id', verifyToken, async (req, res) => {
             const id = req.params.id;
             const role = req.body.role;
             const filter = { _id: new ObjectId(id) };
@@ -87,9 +122,11 @@ async function run() {
             res.send(result);
         });
 
-        // 6. Check if User is Admin
-        app.get('/users/admin/:email', async (req, res) => {
+        // 7. Check if User is Admin
+        app.get('/users/admin/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
+            if (req.decodedUser.email !== email) return res.status(403).send({ message: 'forbidden' });
+
             const query = { email: email };
             const user = await usersCollection.findOne(query);
             let isAdmin = false;
@@ -99,9 +136,11 @@ async function run() {
             res.send({ admin: isAdmin });
         });
 
-        // 7. Check if User is Chef
-        app.get('/users/chef/:email', async (req, res) => {
+        // 8. Check if User is Chef
+        app.get('/users/chef/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
+            if (req.decodedUser.email !== email) return res.status(403).send({ message: 'forbidden' });
+
             const query = { email: email };
             const user = await usersCollection.findOne(query);
             let isChef = false;
@@ -111,38 +150,38 @@ async function run() {
             res.send({ chef: isChef });
         });
 
-        // --- CHEF ROUTES ---
+        // --- CHEF ROUTES (Protected) ---
 
-        // 8. Add a New Meal
-        app.post('/meals', async (req, res) => {
+        // 9. Add a New Meal
+        app.post('/meals', verifyToken, async (req, res) => {
             const item = req.body;
             const result = await mealsCollection.insertOne(item);
             res.send(result);
         });
 
-        // 9. Get Meals by Specific Chef
-        app.get('/meals/chef/:email', async (req, res) => {
+        // 10. Get Meals by Specific Chef
+        app.get('/meals/chef/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
             const query = { chefEmail: email };
             const result = await mealsCollection.find(query).toArray();
             res.send(result);
         });
 
-        // 10. Delete a Meal
-        app.delete('/meals/:id', async (req, res) => {
+        // 11. Delete a Meal
+        app.delete('/meals/:id', verifyToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
             const result = await mealsCollection.deleteOne(query);
             res.send(result);
         });
 
-        // --- ORDER ROUTES ---
+        // --- ORDER ROUTES (Protected) ---
 
-        // 11. Save a New Order
-        app.post('/orders', async (req, res) => {
+        // 12. Save a New Order
+        app.post('/orders', verifyToken, async (req, res) => {
             const order = req.body;
             order.orderTime = new Date();
-            order.status = 'pending';
+            order.status = 'pending'; // Default status
 
             const query = {
                 userEmail: order.userEmail,
@@ -172,29 +211,30 @@ async function run() {
             }
         });
 
-        // 12. Delete/Cancel an Order
-        app.delete('/orders/:id', async (req, res) => {
+        // 12a. Get Orders by Email (User Side)
+        app.get('/orders', verifyToken, async (req, res) => {
+            const email = req.query.email;
+            if (!email) return res.send([]);
+            // Basic security: User can only see their own orders
+            if (req.decodedUser.email !== email) return res.status(403).send({ message: 'forbidden' });
+
+            const query = { userEmail: email };
+            const result = await ordersCollection.find(query).toArray();
+            res.send(result);
+        });
+
+        // 13. Delete/Cancel an Order
+        app.delete('/orders/:id', verifyToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
             const result = await ordersCollection.deleteOne(query);
             res.send(result);
         });
 
-        // 13. Get Orders by Email
-        app.get('/orders', async (req, res) => {
-            const email = req.query.email;
-            if (!email) {
-                return res.send([]);
-            }
-            const query = { userEmail: email };
-            const result = await ordersCollection.find(query).toArray();
-            res.send(result);
-        });
-
-        // --- CHEF ORDER MANAGEMENT ---
+        // --- CHEF ORDER MANAGEMENT (Protected) ---
 
         // 14. GET: Fetch all orders for a specific chef
-        app.get('/orders/chef/:chefEmail', async (req, res) => {
+        app.get('/orders/chef/:chefEmail', verifyToken, async (req, res) => {
             const email = req.params.chefEmail;
             const query = {
                 $or: [
@@ -207,7 +247,7 @@ async function run() {
         });
 
         // 15. PATCH: Update order status
-        app.patch('/orders/status/:id', async (req, res) => {
+        app.patch('/orders/status/:id', verifyToken, async (req, res) => {
             const id = req.params.id;
             const { status } = req.body;
             const filter = { _id: new ObjectId(id) };
@@ -218,13 +258,12 @@ async function run() {
             res.send(result);
         });
 
-        // --- STRIPE PAYMENT ROUTES ---
+        // --- STRIPE PAYMENT ROUTES (Protected) ---
 
         // 16. Create Payment Intent
-        app.post('/create-payment-intent', async (req, res) => {
+        app.post('/create-payment-intent', verifyToken, async (req, res) => {
             const { price } = req.body;
             const amount = parseInt(price * 100);
-            console.log("Creating payment intent for:", amount);
 
             const paymentIntent = await stripe.paymentIntents.create({
                 amount: amount,
@@ -238,7 +277,7 @@ async function run() {
         });
 
         // 17. Save Payment Info & Update Order
-        app.post('/payments', async (req, res) => {
+        app.post('/payments', verifyToken, async (req, res) => {
             const payment = req.body;
             const paymentResult = await paymentCollection.insertOne(payment);
 
@@ -255,24 +294,26 @@ async function run() {
         });
 
         // 18. Get Single Order by ID
-        app.get('/orders/:id', async (req, res) => {
+        app.get('/orders/:id', verifyToken, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
             const result = await ordersCollection.findOne(query);
             res.send(result);
         });
 
-        // --- NEW ROUTE: PAYMENT HISTORY (Added here) ---
+        // --- PAYMENT HISTORY (Protected) ---
 
         // 19. GET Payment History by Email
-        app.get('/payments/:email', async (req, res) => {
+        app.get('/payments/:email', verifyToken, async (req, res) => {
+            if (req.decodedUser.email !== req.params.email) return res.status(403).send({ message: 'forbidden' });
+            
             const query = { email: req.params.email };
             const result = await paymentCollection.find(query).toArray();
             res.send(result);
         });
-        // 20. GET ALL Payments (For Admin Dashboard)
-        app.get('/payments', async (req, res) => {
-            // In a real app, you should add verifyToken and verifyAdmin middleware here
+
+        // 20. GET ALL Payments (Admin)
+        app.get('/payments', verifyToken, async (req, res) => {
             const result = await paymentCollection.find().toArray();
             res.send(result);
         });
